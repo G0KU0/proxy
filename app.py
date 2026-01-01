@@ -7,14 +7,14 @@ from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
-# --- BEÁLLÍTÁSOK (38.000 proxyhoz optimalizálva) ---
+# --- KONFIGURÁCIÓ (Gyorsított mód) ---
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
 INPUT_FILE = "proxy.txt"
 RESULT_FILE = "mukodo_proxyk.txt"
 
-THREADS = 20    # Kevesebb szál = nagyobb stabilitás a Renderen
-TIMEOUT = 5     # 5 másodpercnél többet nem várunk
-REPORT_EVERY = 50 # Sűrűbb jelentés, hogy lásd, ha halad
+THREADS = 200      # Megduplázott sebesség (25 helyett 50)
+TIMEOUT = 3       # Gyorsabb továbbugrás (5 mp helyett 3 mp)
+REPORT_EVERY = 5000 
 
 processed_count = 0
 working_proxies = []
@@ -23,28 +23,39 @@ lock = threading.Lock()
 def send_discord_msg(text):
     if DISCORD_WEBHOOK_URL:
         try:
-            # Rövid timeout, hogy ne blokkolja a scriptet
             requests.post(DISCORD_WEBHOOK_URL, json={"content": text}, timeout=5)
         except:
             pass
 
+def send_discord_file():
+    if not DISCORD_WEBHOOK_URL or not working_proxies:
+        return
+    try:
+        with open(RESULT_FILE, "w") as f:
+            f.write("\n".join(working_proxies))
+        with open(RESULT_FILE, "rb") as f:
+            requests.post(DISCORD_WEBHOOK_URL, 
+                          data={"content": f"🏁 **VÉGEZTEM!**\nEllenőrizve: {processed_count} proxy.\nTalált működő: **{len(working_proxies)}**"}, 
+                          files={"file": (RESULT_FILE, f, "text/plain")}, timeout=15)
+        if os.path.exists(RESULT_FILE):
+            os.remove(RESULT_FILE)
+    except Exception as e:
+        print(f"Hiba a fájlküldésnél: {e}")
+
 def check_logic():
     global processed_count
     if not os.path.exists(INPUT_FILE):
-        print("Hiba: proxy.txt nem található!")
         return
 
-    # Fájl beolvasása
     with open(INPUT_FILE, "r") as f:
         proxies = list(set([l.strip() for l in f if l.strip()]))
 
     total = len(proxies)
-    # AZONNALI ÜZENET: Ha ezt megkapod, a webhook jól működik!
-    send_discord_msg(f"✅ **Szerver elindult!** 38k proxy ellenőrzése kezdődik (20 szálon).")
+    send_discord_msg(f"⚡ **Gyorsított indítás:** {total} proxy ellenőrzése kezdődik (50 szál, 3mp timeout).")
 
     def validate(addr):
         global processed_count
-        # Csak HTTP és SOCKS5-öt nézünk az erőforrások kímélése miatt
+        # Csak a két leggyakoribb típust nézzük a sebességért
         for proto in ["http", "socks5"]:
             url = f"{proto}://{addr}"
             try:
@@ -58,39 +69,22 @@ def check_logic():
         
         with lock:
             processed_count += 1
-            # Render logba minden 10 után írunk
-            if processed_count % 10 == 0:
+            if processed_count % 500 == 0: # Render logba ritkábban írunk a CPU kímélése miatt
                 print(f"Haladás: {processed_count}/{total}")
             
-            # Discordra REPORT_EVERY (50) után küldünk
             if processed_count % REPORT_EVERY == 0:
-                send_discord_msg(f"⏳ {processed_count}/{total} kész. (Működő: {len(working_proxies)})")
+                send_discord_msg(f"⏳ **Állapot:** {processed_count}/{total} kész. (Eddig jó: {len(working_proxies)})")
 
-    # Szálkezelő indítása
     with ThreadPoolExecutor(max_workers=THREADS) as executor:
         executor.map(validate, proxies)
 
-    # Végső fájl küldése a legvégén
-    if working_proxies:
-        with open(RESULT_FILE, "w") as f:
-            f.write("\n".join(working_proxies))
-        with open(RESULT_FILE, "rb") as f:
-            requests.post(DISCORD_WEBHOOK_URL, 
-                          data={"content": "🏁 **VÉGEZTEM!** Itt a teljes lista:"}, 
-                          files={"file": (RESULT_FILE, f, "text/plain")}, timeout=10)
-    else:
-        send_discord_msg("❌ Lefutott, de nem találtam működő proxyt.")
+    send_discord_file()
 
 @app.route('/')
 def home():
-    # Ez a válasz kell a Rendernek, hogy tudja: él a szerver
-    return f"ONLINE - Ellenőrizve: {processed_count}"
+    return f"GYORSÍTOTT MÓD - {processed_count}/{processed_count if processed_count > 0 else '...'}"
 
 if __name__ == "__main__":
-    # Azonnal indítjuk a háttérszálat
-    t = threading.Thread(target=check_logic)
-    t.daemon = True
-    t.start()
-    
+    threading.Thread(target=check_logic, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
